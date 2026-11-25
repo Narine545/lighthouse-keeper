@@ -33,6 +33,7 @@ var _aurora_reset_pending := false
 var _meteor_left := 0
 var _meteor_t := 0.0
 var _shake := 0.0
+var _whale: Whale = null
 var _hint_stage := 0
 var _click_hint_done := false
 var _swirl_hint_done := true
@@ -215,6 +216,22 @@ func _process(delta: float) -> void:
         bg.set_bloom(_bloom_v)
         bg.set_aurora(_aurora_v)
         bg.set_sway(sin(_t * 17.0) * 8.0 * _shake, cos(_t * 13.0) * 6.0 * _shake)
+
+        # метаболы: свет игрока, кит и проснувшиеся медузы сливаются
+        # в одну живую световую массу (smin-поле в шейдере фона)
+        var bl: Array = []
+        bl.append([player.position, 95.0, 0.85, Vector3(0.62, 0.95, 0.88)])
+        if _whale != null and is_instance_valid(_whale):
+                bl.append([_whale.position, 235.0, 0.4, Vector3(0.30, 0.72, 0.66)])
+        for s in sleepers:
+                if bl.size() >= 8:
+                        break
+                if s is Jelly and s.awake:
+                        var jt := s.tint()
+                        var jv := 0.6 + 0.25 * sin(_t * 2.0 + s.position.x * 0.01)
+                        bl.append([s.position, s.body_r() * 1.15, jv, Vector3(jt.r, jt.g, jt.b)])
+        bg.set_balls(bl)
+
         post.set_time(_t)
         meter.set_value(_meter_v)
 
@@ -277,6 +294,7 @@ func _process(delta: float) -> void:
                 var dir := 1 if randf() < 0.5 else -1
                 w.setup(_vp.x, dir)
                 add_child(w)
+                _whale = w
                 w.song.connect(_on_whale_song.bind(w))
                 meter.flash()
                 _toast("Кто-то большой плывёт вдалеке…")
