@@ -1,14 +1,11 @@
 ; Engine configuration file.
-; It's best edited using the editor UI and not directly,
-; since the parameters that go here are not all obvious.
-
 config_version=5
 
 [application]
 
-config/name="Смотритель маяка"
-config/description="Расслабляющая игра: веди корабли светом маяка сквозь живое ночное море. Вся графика и звук создаются кодом — ни одного внешнего ассета."
+config/name="Тихая глубина"
 run/main_scene="res://scenes/main.tscn"
+config/features=PackedStringArray("4.3")
 config/icon="res://icon.svg"
 
 [display]
@@ -16,10 +13,9 @@ config/icon="res://icon.svg"
 window/size/viewport_width=1280
 window/size/viewport_height=720
 window/stretch/mode="canvas_items"
-window/stretch/aspect="keep"
+window/stretch/aspect="expand"
 
 [rendering]
 
-renderer/rendering_method="gl_compatibility"
-renderer/rendering_method.mobile="gl_compatibility"
-environment/defaults/default_clear_color=Color(0.02, 0.04, 0.09, 1)
+viewport/hdr_2d=true
+environment/defaults/default_clear_color=Color(0.012, 0.024, 0.05, 1)
