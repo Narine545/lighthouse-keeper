@@ -55,7 +55,6 @@ func wake() -> void:
 func _process(delta: float) -> void:
         _t += delta
         _swirl_cd = maxf(_swirl_cd - delta, 0.0)
-        var swirl_center := Vector2.ZERO
         var swirl_r := 90.0
         for f in _fish:
                 var p: Vector2 = f["p"]

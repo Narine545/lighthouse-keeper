@@ -47,3 +47,19 @@ func set_aurora(v: float) -> void:
 
 func set_sway(dx: float, dy: float) -> void:
         _mat.set_shader_parameter("sway", Vector2(dx, dy))
+
+
+# Метаболы: список [позиция: Vector2, радиус: float, сила: float, цвет: Vector3].
+# Слоты сверх восьми игнорируются — шейдер держит ровно 8 шаров.
+func set_balls(list: Array) -> void:
+        var pr := PackedVector4Array()
+        var cols := PackedVector3Array()
+        for b in list:
+                pr.append(Vector4(b[0].x, b[0].y, b[1], b[2]))
+                cols.append(b[3])
+        while pr.size() < 8:
+                pr.append(Vector4(0.0, 0.0, 0.0, 0.0))
+                cols.append(Vector3.ZERO)
+        _mat.set_shader_parameter("balls", pr)
+        _mat.set_shader_parameter("ball_cols", cols)
+        _mat.set_shader_parameter("balls_n", mini(list.size(), 8))

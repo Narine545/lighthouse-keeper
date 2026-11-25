@@ -45,6 +45,14 @@ func wake() -> void:
                 })
 
 
+func tint() -> Color:
+        return _hue
+
+
+func body_r() -> float:
+        return _R
+
+
 func _process(delta: float) -> void:
         _t += delta
         var spd := 1.15 if awake else 0.5

@@ -42,7 +42,6 @@ func pulse() -> bool:
 func _process(delta: float) -> void:
         _t += delta
         var k := 1.0 - exp(-delta * 4.2)
-        var prev := position
         position = position.lerp(_target, k)
         _energy = maxf(_energy - delta * 0.65, 0.0)
         _pulse_t += delta
