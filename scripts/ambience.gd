@@ -11,8 +11,8 @@ extends Node
 #     ГЕНЕРАТОРЕ цикла, на ЛОКАЛЬНЫХ массивах (PackedFloat32Array —
 #     тип-значение, правки параметра внутри отдельной функции могут
 #     молча не возвращаться вызывающему коду);
-#  3) жёсткий clamp перед каждым encode_s16 — переполнение int16 (тот
-#     самый «хрип») невозможно в принципе.
+#  3) жёсткий clamp перед каждым encode_s16 заменён мягким «плечом» _soft:
+#     переполнение int16 (тот самый «хрип») невозможно в принципе.
 
 const SR := 44100
 const PENTA := [220.0, 261.63, 293.66, 329.63, 392.0, 440.0, 523.25]
@@ -32,8 +32,9 @@ var _drift_t := 8.0
 
 func _ready() -> void:
         _make_bus("Amb", 0.30)
-        _make_bus("Music", 0.45)
+        _make_bus("Music", 0.28)
         _make_bus("SFX", 0.35)
+        _make_master_guard()
 
         _deep_p = AudioStreamPlayer.new()
         _deep_p.stream = _deep_loop(30.0)
@@ -85,13 +86,35 @@ func _make_bus(bus_name: String, reverb_wet: float) -> void:
                 AudioServer.add_bus_effect(idx, rv)
 
 
+# Предохранитель всей смеси: мягкий лимитер на мастере. Даже если пики
+# нескольких шин совпадут во времени (зов кита + аккорд + гул глубины)
+# — на выходе ни жёсткого клипа, ни рывков диффузора.
+func _make_master_guard() -> void:
+        var lim := AudioEffectLimiter.new()
+        lim.threshold_db = -4.0
+        lim.ceiling_db = -1.0
+        lim.soft_clip_db = 2.0
+        lim.soft_clip_ratio = 3.0
+        AudioServer.add_bus_effect(0, lim)
+
+
+# Мягкое «плечо» вместо жёсткого потолка: всё до 0.78 проходит без искажений,
+# верхний хвост плавно прижимается к единице через tanh — переполнение int16
+# (тот самый «хрип») невозможно в принципе, а щелчков нет и на границе.
+func _soft(x: float) -> float:
+        var a := absf(x)
+        if a <= 0.78:
+                return x
+        return signf(x) * (0.78 + 0.22 * tanh((a - 0.78) / 0.22))
+
+
 func _to_wav_stereo(L: PackedFloat32Array, R: PackedFloat32Array, loop_start: int) -> AudioStreamWAV:
         var frames := L.size()
         var data := PackedByteArray()
         data.resize(frames * 4)
         for i in frames:
-                data.encode_s16(i * 4, int(clampf(L[i], -1.0, 1.0) * 32767.0))
-                data.encode_s16(i * 4 + 2, int(clampf(R[i], -1.0, 1.0) * 32767.0))
+                data.encode_s16(i * 4, int(_soft(L[i]) * 32767.0))
+                data.encode_s16(i * 4 + 2, int(_soft(R[i]) * 32767.0))
         var ws := AudioStreamWAV.new()
         ws.format = AudioStreamWAV.FORMAT_16_BITS
         ws.mix_rate = SR
@@ -109,7 +132,7 @@ func _to_wav_mono(L: PackedFloat32Array) -> AudioStreamWAV:
         var data := PackedByteArray()
         data.resize(frames * 2)
         for i in frames:
-                data.encode_s16(i * 2, int(clampf(L[i], -1.0, 1.0) * 32767.0))
+                data.encode_s16(i * 2, int(_soft(L[i]) * 32767.0))
         var ws := AudioStreamWAV.new()
         ws.format = AudioStreamWAV.FORMAT_16_BITS
         ws.mix_rate = SR
@@ -335,7 +358,15 @@ func _swell_pad(notes: Array, dur: float, atk: float, rel: float) -> AudioStream
         return wav
 
 
-# Песня кита: длинный скользящий зов с вибрато и подголосками.
+# Песня кита — по правилам саунд-дизайна низких голосов (саб-синтез):
+#  1) подгармоник ниже 45 Гц НЕТ: именно они выворачивают диффузор колонки.
+#     Тембр = фундамент (82–98 Гц) + обертоны 2/3/4 с быстрым спадом;
+#  2) вибрато относительное (±1.2%), а не абсолютное — спектр не расползается;
+#  3) огибающая smoothstep с долгой атакой (1.8 с) — ни щелчков, ни низко-
+#     частотных «кирпичей» в момент вступления;
+#  4) DC-блокатор первого порядка (срез ~35 Гц) — этап не тащит постоянку
+#     и инфранизкие наплывы при скольжении тона;
+#  5) мягкая tanh-сатурация и нормализация на пик 0.40 — запас до клипа.
 func _whale_call(f0: float) -> AudioStreamWAV:
         var key := "w%d" % int(f0)
         if _whale_cache.has(key):
@@ -345,22 +376,38 @@ func _whale_call(f0: float) -> AudioStreamWAV:
         var L := PackedFloat32Array()
         L.resize(frames)
         var ph := 0.0
+        var x_prev := 0.0
+        var y_prev := 0.0
+        var breath_lp := 0.0
         for i in frames:
                 var u := float(i) / SR
-                var f := f0 * (0.74 + 0.26 * exp(-1.1 * u))
-                f += 2.2 * sin(TAU * 3.8 * u) * clampf(u / 1.5, 0.0, 1.0)
+                var f := f0 * (0.80 + 0.20 * exp(-1.2 * u))
+                f *= 1.0 + 0.012 * sin(TAU * 3.4 * u) * clampf(u / 2.0, 0.0, 1.0)
                 ph += TAU * f / SR
-                var a := clampf(u / 1.3, 0.0, 1.0)
-                var r := clampf((dur - u) / 2.4, 0.0, 1.0)
+                var a := clampf(u / 1.8, 0.0, 1.0)
+                a = a * a * (3.0 - 2.0 * a)
+                var r := clampf((dur - u) / 2.6, 0.0, 1.0)
+                r = r * r * (3.0 - 2.0 * r)
                 var env := a * r
-                var v := sin(ph) + 0.4 * sin(ph * 2.0 + 0.6 * u) + 0.16 * sin(ph * 3.0)
-                v += 0.3 * sin(ph * 0.5)
-                L[i] = v * env * 0.30
+                var v := sin(ph) + 0.30 * sin(ph * 2.0 + 0.6 * u)
+                v += 0.12 * sin(ph * 3.0) + 0.045 * sin(ph * 4.0)
+                # дыхание: чуть тёплого отфильтрованного шума, без шипения
+                var nz := (randf() * 2.0 - 1.0) * env * 0.035
+                breath_lp += (nz - breath_lp) * 0.09
+                var x := v * env + breath_lp
+                # DC-блокатор: y[n] = x[n] - x[n-1] + R * y[n-1]
+                var y := x - x_prev + 0.995 * y_prev
+                x_prev = x
+                y_prev = y
+                L[i] = y
+        # мягкая сатурация вместо жёсткого потолка
+        for i in frames:
+                L[i] = tanh(L[i] * 1.5) / 1.5
         var mx := 0.0
         for i in frames:
                 mx = maxf(mx, absf(L[i]))
         if mx > 0.0001:
-                var g := 0.55 / mx
+                var g := 0.40 / mx
                 for i in frames:
                         L[i] = L[i] * g
         var wav := _to_wav_mono(L)
@@ -469,7 +516,7 @@ func pulse_whum() -> void:
 
 func whale_call(i: int) -> void:
         var f0 := 98.0 if i % 2 == 0 else 82.0
-        _play("Music", _whale_call(f0), -6.0)
+        _play("Music", _whale_call(f0), -9.0)
 
 
 func meteor_shimmer() -> void:
