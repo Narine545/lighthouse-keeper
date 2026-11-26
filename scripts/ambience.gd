@@ -3,16 +3,21 @@ extends Node
 
 # Полностью генеративный звук «Тихой глубины» — ни одного аудиофайла.
 #
-# Уроки прошлой игры учтены:
-#  1) никакого шипения: сырой высокочастотный шум запрещён. Вода — это
-#     «коричневый» шум через каскад низких фильтров, верхний регистр всегда
-#     приглушён и «вспухает» только на гребне медленной волны;
-#  2) кроссфейд хвоста в голову и нормализация выполняются ПРЯМО В
+# Правила смеси (перегруз устранён по построению, а не обработкой):
+#  1) инфразвук запрещён: «вода» лежит в полосе 30–90 Гц. Прежний гул
+#     из интеграторов жил ниже 20 Гц — ухом его не слышно, но он
+#     выворачивал диффузор и «грязнил» межмодуляцией все остальные
+#     голоса: именно это ощущалось как пережатый, перекачанный звук;
+#  2) лимитер на мастере УДАЛЁН: вместо динамики — жёсткий бюджет
+#     пиков. Сумма всех одновременных голосов не превышает ~0.8
+#     по построению, поэтому нечему «дышать» и зажимать смесь;
+#  3) никакой сатурации: tanh лишь добавляет грязные гармоники к
+#     чистым синусам. _soft остаётся только как математическая
+#     страховка от переполнения int16 — до неё смесь не доходит;
+#  4) кроссфейд хвоста в голову и нормализация выполняются ПРЯМО В
 #     ГЕНЕРАТОРЕ цикла, на ЛОКАЛЬНЫХ массивах (PackedFloat32Array —
 #     тип-значение, правки параметра внутри отдельной функции могут
-#     молча не возвращаться вызывающему коду);
-#  3) жёсткий clamp перед каждым encode_s16 заменён мягким «плечом» _soft:
-#     переполнение int16 (тот самый «хрип») невозможно в принципе.
+#     молча не возвращаться вызывающему коду).
 
 const SR := 44100
 const PENTA := [220.0, 261.63, 293.66, 329.63, 392.0, 440.0, 523.25]
@@ -31,10 +36,12 @@ var _drift_t := 8.0
 
 
 func _ready() -> void:
-        _make_bus("Amb", 0.30)
-        _make_bus("Music", 0.28)
-        _make_bus("SFX", 0.35)
-        _make_master_guard()
+        _make_bus("Amb", 0.22)
+        _make_bus("Music", 0.20)
+        _make_bus("SFX", 0.24)
+        # статическая страховка мастера: −2 дБ, НЕ динамика — ничего
+        # не реагирует на сигнал и не «дышит», просто запас до стенки
+        AudioServer.set_bus_volume_db(0, -2.0)
 
         _deep_p = AudioStreamPlayer.new()
         _deep_p.stream = _deep_loop(30.0)
@@ -50,7 +57,10 @@ func _ready() -> void:
         add_child(_pad_p)
         _pad_p.play()
 
-        for i in 10:
+        # 16 голосов: длинные звуки (зов кита — 7 с, пад сияния — 12 с)
+        # не должны отбирать голоса друг у друга: украденный голос
+        # обрывается щелчком прямо посреди звука
+        for i in 16:
                 var p := AudioStreamPlayer.new()
                 p.bus = "Music"
                 add_child(p)
@@ -80,22 +90,10 @@ func _make_bus(bus_name: String, reverb_wet: float) -> void:
                 AudioServer.set_bus_send(idx, "Master")
                 var rv := AudioEffectReverb.new()
                 rv.room_size = 0.9
-                rv.damping = 0.55
+                rv.damping = 0.62
                 rv.wet = reverb_wet
                 rv.dry = 0.9
                 AudioServer.add_bus_effect(idx, rv)
-
-
-# Предохранитель всей смеси: мягкий лимитер на мастере. Даже если пики
-# нескольких шин совпадут во времени (зов кита + аккорд + гул глубины)
-# — на выходе ни жёсткого клипа, ни рывков диффузора.
-func _make_master_guard() -> void:
-        var lim := AudioEffectLimiter.new()
-        lim.threshold_db = -4.0
-        lim.ceiling_db = -1.0
-        lim.soft_clip_db = 2.0
-        lim.soft_clip_ratio = 3.0
-        AudioServer.add_bus_effect(0, lim)
 
 
 # Мягкое «плечо» вместо жёсткого потолка: всё до 0.78 проходит без искажений,
@@ -141,44 +139,40 @@ func _to_wav_mono(L: PackedFloat32Array) -> AudioStreamWAV:
         return ws
 
 
-# Глубина: тёмный «коричневый» шум через каскад из трёх низких фильтров.
-# Три несоизмеримых медленных наката дают воду без единой слышимой частоты
-# «шипения»: верх есть только в виде лёгкого «песка» на гребне волны.
+# Глубина: тёмный шум воды в жёсткой полосе 30–90 Гц. Прежний каскад
+# интеграторов копил инфразвук ниже 20 Гц — неслышимый, но он
+# пережимал микс и качал всю сцену. Теперь — слышимый низ воды
+# с медленными накатами, а верх — только лёгкий «песок» на гребне.
 func _deep_loop(dur: float) -> AudioStreamWAV:
         var frames := int(dur * SR)
         var L := PackedFloat32Array()
         var R := PackedFloat32Array()
         L.resize(frames)
         R.resize(frames)
-        var b1 := 0.0
-        var b2 := 0.0
-        var a1 := 0.0
-        var a2 := 0.0
-        var a3 := 0.0
-        var c1 := 0.0
-        var c2 := 0.0
-        var c3 := 0.0
+        var lp1 := 0.0
+        var lp2 := 0.0
+        var dc1 := 0.0
+        var dc2 := 0.0
         var s1 := 0.0
         var s2 := 0.0
         for i in frames:
                 var ph := TAU * float(i) / SR / dur
-                b1 += (randf() * 2.0 - 1.0) * 0.02
-                b1 *= 0.998
-                b2 += (randf() * 2.0 - 1.0) * 0.02
-                b2 *= 0.998
-                a1 += (b1 - a1) * 0.02
-                a2 += (a1 - a2) * 0.045
-                a3 += (a2 - a3) * 0.11
-                c1 += (b2 - c1) * 0.02
-                c2 += (c1 - c2) * 0.045
-                c3 += (c2 - c3) * 0.11
+                var w1 := randf() * 2.0 - 1.0
+                var w2 := randf() * 2.0 - 1.0
+                # полосовой канал «воды»: фильтр ~90 Гц оставляет низ,
+                # вычитание медленно следящей средней (срез ~30 Гц)
+                # удаляет всё, что ниже слышимого диапазона
+                lp1 += (w1 - lp1) * 0.013
+                lp2 += (w2 - lp2) * 0.013
+                dc1 += (lp1 - dc1) * 0.0043
+                dc2 += (lp2 - dc2) * 0.0043
                 var swell := 0.55 + 0.28 * sin(ph + 0.7) + 0.17 * sin(ph * 2.3 + 2.1) + 0.10 * sin(ph * 3.7 + 4.4)
                 var swell2 := 0.55 + 0.28 * sin(ph + 2.9) + 0.17 * sin(ph * 2.3 + 0.4) + 0.10 * sin(ph * 3.7 + 1.2)
-                s1 += ((randf() * 2.0 - 1.0) - s1) * 0.35
-                s2 += ((randf() * 2.0 - 1.0) - s2) * 0.35
+                s1 += (w1 - s1) * 0.35
+                s2 += (w2 - s2) * 0.35
                 var sand := swell * swell * swell * swell
-                L[i] = a3 * 9.0 * swell + s1 * 0.010 * sand
-                R[i] = c3 * 9.0 * swell2 + s2 * 0.010 * sand
+                L[i] = (lp1 - dc1) * 5.0 * swell + s1 * 0.010 * sand
+                R[i] = (lp2 - dc2) * 5.0 * swell2 + s2 * 0.010 * sand
         # Кроссфейд + нормализация — здесь и только здесь, на локальных массивах.
         var n := int(0.6 * SR)
         for k in n:
@@ -191,7 +185,7 @@ func _deep_loop(dur: float) -> AudioStreamWAV:
                 mx = maxf(mx, absf(L[i]))
                 mx = maxf(mx, absf(R[i]))
         if mx > 0.0001:
-                var g := 0.5 / mx
+                var g := 0.40 / mx
                 for i in frames:
                         L[i] = L[i] * g
                         R[i] = R[i] * g
@@ -286,7 +280,7 @@ func _chord(notes: Array, gap := 0.09, dur := 5.2) -> AudioStreamWAV:
         for i in frames:
                 mx = maxf(mx, absf(L[i]))
         if mx > 0.0001:
-                var g := 0.55 / mx
+                var g := 0.50 / mx
                 for i in frames:
                         L[i] = L[i] * g
         var wav := _to_wav_mono(L)
@@ -313,7 +307,7 @@ func _motif(notes: Array, gap := 0.09) -> AudioStreamWAV:
         for i in frames:
                 mx = maxf(mx, absf(L[i]))
         if mx > 0.0001:
-                var g := 0.5 / mx
+                var g := 0.45 / mx
                 for i in frames:
                         L[i] = L[i] * g
         var wav := _to_wav_mono(L)
@@ -349,7 +343,7 @@ func _swell_pad(notes: Array, dur: float, atk: float, rel: float) -> AudioStream
                 mx = maxf(mx, absf(L[i]))
                 mx = maxf(mx, absf(R[i]))
         if mx > 0.0001:
-                var g := 0.5 / mx
+                var g := 0.45 / mx
                 for i in frames:
                         L[i] = L[i] * g
                         R[i] = R[i] * g
@@ -366,7 +360,8 @@ func _swell_pad(notes: Array, dur: float, atk: float, rel: float) -> AudioStream
 #     частотных «кирпичей» в момент вступления;
 #  4) DC-блокатор первого порядка (срез ~35 Гц) — этап не тащит постоянку
 #     и инфранизкие наплывы при скольжении тона;
-#  5) мягкая tanh-сатурация и нормализация на пик 0.40 — запас до клипа.
+#  5) сатурации НЕТ: сигнал — чистый узкополосный синус, нормализация
+#     на пик 0.34 по бюджету смеси. Нелинейность только добавляет грязь.
 func _whale_call(f0: float) -> AudioStreamWAV:
         var key := "w%d" % int(f0)
         if _whale_cache.has(key):
@@ -400,14 +395,11 @@ func _whale_call(f0: float) -> AudioStreamWAV:
                 x_prev = x
                 y_prev = y
                 L[i] = y
-        # мягкая сатурация вместо жёсткого потолка
-        for i in frames:
-                L[i] = tanh(L[i] * 1.5) / 1.5
         var mx := 0.0
         for i in frames:
                 mx = maxf(mx, absf(L[i]))
         if mx > 0.0001:
-                var g := 0.40 / mx
+                var g := 0.34 / mx
                 for i in frames:
                         L[i] = L[i] * g
         var wav := _to_wav_mono(L)
@@ -436,7 +428,7 @@ func _make_whum() -> AudioStreamWAV:
         for i in frames:
                 mx = maxf(mx, absf(L[i]))
         if mx > 0.0001:
-                var g := 0.7 / mx
+                var g := 0.55 / mx
                 for i in frames:
                         L[i] = L[i] * g
         return _to_wav_mono(L)
@@ -462,7 +454,7 @@ func _make_bubble() -> AudioStreamWAV:
         for i in frames:
                 mx = maxf(mx, absf(L[i]))
         if mx > 0.0001:
-                var g := 0.6 / mx
+                var g := 0.50 / mx
                 for i in frames:
                         L[i] = L[i] * g
         return _to_wav_mono(L)
@@ -495,7 +487,7 @@ func _process(delta: float) -> void:
 # --- события и существа ---
 
 func jelly_wake() -> void:
-        _play("Music", _chord([220.0, 440.0, 523.25, 659.25]), -8.0, randf_range(0.99, 1.02))
+        _play("Music", _chord([220.0, 440.0, 523.25, 659.25]), -10.0, randf_range(0.99, 1.02))
 
 
 func fish_wake() -> void:
@@ -503,7 +495,7 @@ func fish_wake() -> void:
 
 
 func coral_wake() -> void:
-        _play("Music", _chord([130.81, 196.0, 261.63], 0.14), -9.0, randf_range(0.99, 1.02))
+        _play("Music", _chord([130.81, 196.0, 261.63], 0.14), -11.0, randf_range(0.99, 1.02))
 
 
 func swirl() -> void:
@@ -511,12 +503,12 @@ func swirl() -> void:
 
 
 func pulse_whum() -> void:
-        _play("SFX", _whum_s, -7.0, randf_range(0.95, 1.08))
+        _play("SFX", _whum_s, -8.0, randf_range(0.95, 1.08))
 
 
 func whale_call(i: int) -> void:
         var f0 := 98.0 if i % 2 == 0 else 82.0
-        _play("Music", _whale_call(f0), -9.0)
+        _play("Music", _whale_call(f0), -10.0)
 
 
 func meteor_shimmer() -> void:
@@ -524,8 +516,8 @@ func meteor_shimmer() -> void:
 
 
 func bloom_swell() -> void:
-        _play("Music", _swell_pad([220.0, 261.63, 329.63, 392.0], 9.0, 2.5, 2.5), -9.0)
+        _play("Music", _swell_pad([220.0, 261.63, 329.63, 392.0], 9.0, 2.5, 2.5), -10.0)
 
 
 func aurora_swell() -> void:
-        _play("Music", _swell_pad([261.63, 329.63, 392.0, 523.25], 12.0, 3.0, 3.5), -10.0)
+        _play("Music", _swell_pad([261.63, 329.63, 392.0, 523.25], 12.0, 3.0, 3.5), -11.0)
