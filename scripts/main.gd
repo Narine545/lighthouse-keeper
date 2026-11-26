@@ -149,7 +149,7 @@ func _build_ui() -> void:
 		_toast_tweens.append(null)
 
 
-func _mk_label(sz: int, col: Color, align: int) -> Label:
+func _mk_label(sz: int, col: Color, align: HorizontalAlignment) -> Label:
 	var lbl := Label.new()
 	lbl.add_theme_font_size_override("font_size", sz)
 	lbl.add_theme_color_override("font_color", col)
